@@ -16,6 +16,8 @@ package dev.dint.cryptography_flutter
 
 import android.os.Build
 import androidx.annotation.RequiresApi
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
@@ -28,10 +30,12 @@ import java.security.interfaces.*
 import java.security.spec.*
 import javax.crypto.*
 import javax.crypto.spec.*
+import kotlin.random.Random
 
 /** CryptographyFlutterPlugin */
 class CryptographyFlutterPlugin : FlutterPlugin, MethodCallHandler {
     private lateinit var channel: MethodChannel
+    private val privateKeyCache = mutableMapOf<String, PrivateKey>()
 
     override fun onAttachedToEngine(flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
         channel = MethodChannel(flutterPluginBinding.binaryMessenger, "cryptography_flutter")
@@ -279,19 +283,24 @@ class CryptographyFlutterPlugin : FlutterPlugin, MethodCallHandler {
             result.error("UNSUPPORTED_ALGORITHM", null, null)
             return
         }
-        val provider = call.argument<String>("androidProvider")
-        val generator = when (provider) {
-            null -> KeyPairGenerator.getInstance("EC")
-            else -> KeyPairGenerator.getInstance("EC", provider)
-        }
-        generator.initialize(ECGenParameterSpec(curve))
+        val generator = KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_EC, "AndroidKeyStore")
+        generator.initialize(
+            KeyGenParameterSpec.Builder(
+                "eckeypair",
+                KeyProperties.PURPOSE_AGREE_KEY)
+                .setAlgorithmParameterSpec(ECGenParameterSpec(curve))
+                .build())
         val keyPair = generator.generateKeyPair()
-        val privateKey = keyPair.private as ECPrivateKey
+        val privateKey = keyPair.private
         val publicKey = keyPair.public as ECPublicKey
+        val fakeD = Random.nextBytes(32)
+        val hex = fakeD.joinToString(separator = "") { eachByte -> "%02x".format(eachByte) }
+        privateKeyCache[hex] = privateKey
 
         result.success(
             hashMapOf(
-                "d" to privateKey.s.toByteArray(),
+                //"d" to privateKey.encoded, // null
+                "d" to fakeD,
                 "x" to publicKey.w.affineX.toByteArray(),
                 "y" to publicKey.w.affineY.toByteArray(),
             )
@@ -310,38 +319,26 @@ class CryptographyFlutterPlugin : FlutterPlugin, MethodCallHandler {
             result.error("UNSUPPORTED_ALGORITHM", null, null)
             return
         }
-        val d = call.argument<ByteArray>("localD")!!
+        val fakeD = call.argument<ByteArray>("localD")!!
         val x = call.argument<ByteArray>("localX")!!
         val y = call.argument<ByteArray>("localY")!!
-        val provider = call.argument<String>("androidProvider")
 
-        val parameters = when (provider) {
-            null -> AlgorithmParameters.getInstance("EC")
-            else -> AlgorithmParameters.getInstance("EC", provider)
-        }
+        val hex = fakeD.joinToString(separator = "") { eachByte -> "%02x".format(eachByte) }
+        val privateKey = privateKeyCache[hex]
+
+        val parameters = AlgorithmParameters.getInstance("EC")
         parameters.init(ECGenParameterSpec(curve))
         val ecParameters = parameters.getParameterSpec(ECParameterSpec::class.java)
-        val privateKeySpec = ECPrivateKeySpec(
-            BigInteger(d),
-            ecParameters
-        )
 
         val remoteX = call.argument<ByteArray>("remoteX")!!
         val remoteY = call.argument<ByteArray>("remoteY")!!
         val remotePublicPoint = ECPoint(BigInteger(remoteX), BigInteger(remoteY))
         val remotePublicKeySpec = ECPublicKeySpec(remotePublicPoint, ecParameters)
 
-        val keyFactory = when (provider) {
-            null -> KeyFactory.getInstance("EC")
-            else -> KeyFactory.getInstance("EC", provider)
-        }
-        val privateKey = keyFactory.generatePrivate(privateKeySpec) as ECPrivateKey
+        val keyFactory = KeyFactory.getInstance("EC")
         val remotePublicKey = keyFactory.generatePublic(remotePublicKeySpec) as ECPublicKey
 
-        val keyAgreement = when (provider) {
-            null -> KeyAgreement.getInstance("ECDH")
-            else -> KeyAgreement.getInstance("ECDH", provider)
-        }
+        val keyAgreement = KeyAgreement.getInstance("ECDH", "AndroidKeyStore")
         keyAgreement.init(privateKey)
         keyAgreement.doPhase(remotePublicKey, true)
         val secretKey = keyAgreement.generateSecret()
@@ -414,7 +411,7 @@ class CryptographyFlutterPlugin : FlutterPlugin, MethodCallHandler {
     private fun ecdsaVerify(call: MethodCall, result: Result) {
         val dartCurve = call.argument<String>("curve")!!
         val curve = when (dartCurve) {
-            "p256" -> "secp256r1"
+            "p256" -> "prime256v1"
             "p384" -> "secp384r1"
             "p521" -> "secp521r1"
             else -> null
