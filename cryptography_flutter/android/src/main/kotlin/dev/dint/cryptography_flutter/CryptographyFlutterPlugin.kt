@@ -295,14 +295,20 @@ class CryptographyFlutterPlugin : FlutterPlugin, MethodCallHandler {
         val publicKey = keyPair.public as ECPublicKey
         val fakeD = Random.nextBytes(32)
         val hex = fakeD.joinToString(separator = "") { eachByte -> "%02x".format(eachByte) }
+        var x = publicKey.w.affineX.toByteArray()
+        if (x.size > 32) {
+            x = x.copyOfRange(x.size - 32, x.size)
+        }
+        var y = publicKey.w.affineY.toByteArray()
+        if (y.size > 32) {
+            y = y.copyOfRange(y.size - 32, y.size)
+        }
         privateKeyCache[hex] = privateKey
-
         result.success(
             hashMapOf(
-                //"d" to privateKey.encoded, // null
                 "d" to fakeD,
-                "x" to publicKey.w.affineX.toByteArray(),
-                "y" to publicKey.w.affineY.toByteArray(),
+                "x" to x,
+                "y" to y,
             )
         )
     }
@@ -320,24 +326,26 @@ class CryptographyFlutterPlugin : FlutterPlugin, MethodCallHandler {
             return
         }
         val fakeD = call.argument<ByteArray>("localD")!!
-        val x = call.argument<ByteArray>("localX")!!
-        val y = call.argument<ByteArray>("localY")!!
-
         val hex = fakeD.joinToString(separator = "") { eachByte -> "%02x".format(eachByte) }
         val privateKey = privateKeyCache[hex]
+
+        var remoteX = call.argument<ByteArray>("remoteX")!!
+        var remoteY = call.argument<ByteArray>("remoteY")!!
+        if (remoteX[0] < 0) {
+            remoteX = byteArrayOf(0x00) + remoteX
+        }
+        if (remoteY[0] < 0) {
+            remoteY = byteArrayOf(0x00) + remoteY
+        }
 
         val parameters = AlgorithmParameters.getInstance("EC")
         parameters.init(ECGenParameterSpec(curve))
         val ecParameters = parameters.getParameterSpec(ECParameterSpec::class.java)
 
-        val remoteX = call.argument<ByteArray>("remoteX")!!
-        val remoteY = call.argument<ByteArray>("remoteY")!!
         val remotePublicPoint = ECPoint(BigInteger(remoteX), BigInteger(remoteY))
         val remotePublicKeySpec = ECPublicKeySpec(remotePublicPoint, ecParameters)
-
         val keyFactory = KeyFactory.getInstance("EC")
-        val remotePublicKey = keyFactory.generatePublic(remotePublicKeySpec) as ECPublicKey
-
+        var remotePublicKey = keyFactory.generatePublic(remotePublicKeySpec) as ECPublicKey
         val keyAgreement = KeyAgreement.getInstance("ECDH", "AndroidKeyStore")
         keyAgreement.init(privateKey)
         keyAgreement.doPhase(remotePublicKey, true)
